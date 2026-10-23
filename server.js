@@ -8,7 +8,21 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 const PORT = process.env.PORT || 3000;
-app.use(express.static(path.join(__dirname, "public")));
+const fs = require("fs");
+const publicDir = path.join(__dirname, "public");
+const publicIndex = path.join(publicDir, "index.html");
+const rootIndex = path.join(__dirname, "index.html");
+
+// Serve assets from /public, and explicitly serve the home page whether
+// index.html was uploaded to /public or accidentally placed at repository root.
+app.use(express.static(publicDir));
+app.get("/", (_, res) => {
+  if (fs.existsSync(publicIndex)) return res.sendFile(publicIndex);
+  if (fs.existsSync(rootIndex)) return res.sendFile(rootIndex);
+  return res.status(500).send(
+    "Basic Rummy setup error: index.html was not found. Put it in public/index.html (recommended) or the repository root."
+  );
+});
 app.get("/health", (_, res) => res.json({ ok: true, game: "Basic Rummy" }));
 
 const rooms = new Map();
@@ -46,6 +60,8 @@ function publicState(room, viewerId) {
     latestDrawnCardId: room.drawn && room.drawn.playerId === viewerId ? room.drawn.cardId : null,
     discard: room.discard.slice(-8),
     winnerId: room.winnerId,
+    gameNumber: room.gameNumber || 0,
+    scoreHistory: room.scoreHistory || [],
     message: room.message
   };
 }
@@ -61,19 +77,49 @@ function getRoom(socket) {
 }
 function errorTo(socket, msg) { socket.emit("notice", { type: "error", message: msg }); }
 function startGame(room) {
-  const n = room.players.length, h = room.settings.handSize;
-  if (n < 2) throw new Error("At least 2 players are needed to start.");
-  const decks = requiredDecks(n, h);
+  const activePlayers = room.players.filter(p => p.connected);
+  const h = room.settings.handSize;
+  if (activePlayers.length < 2) throw new Error("At least 2 connected players are needed to start.");
+  const decks = requiredDecks(activePlayers.length, h);
   const cards = makeDeck(decks);
   room.players.forEach(p => { p.hand = []; p.melds = []; });
-  for (let i = 0; i < h; i++) for (const p of room.players) p.hand.push(cards.pop());
+  room.roundPlayerIds = activePlayers.map(p => p.id);
+  for (let i = 0; i < h; i++) for (const p of activePlayers) p.hand.push(cards.pop());
   room.stock = cards;
   room.discard = [room.stock.pop()];
-  room.currentTurn = 0;
+  room.currentTurn = room.players.findIndex(p => p.connected && room.roundPlayerIds.includes(p.id));
   room.status = "playing";
   room.winnerId = null;
-  room.message = `Game started with ${decks} deck${decks === 1 ? "" : "s"} and ${h} cards per player.`;
+  room.gameNumber = (room.gameNumber || 0) + 1;
+  room.message = `Game ${room.gameNumber} started with ${decks} deck${decks === 1 ? "" : "s"} and ${h} cards per player.`;
   room.drawn = null;
+}
+function cardValue(card) {
+  return card.rank === "A" ? 1 : (["J","Q","K"].includes(card.rank) ? 10 : Number(card.rank));
+}
+function handScore(player) {
+  return player.hand.reduce((total, card) => total + cardValue(card), 0);
+}
+function recordRoundScore(room, winner) {
+  if (!room.scoreHistory) room.scoreHistory = [];
+  if (room.scoreHistory.some(round => round.gameNumber === room.gameNumber)) return;
+  const activeIds = new Set(room.roundPlayerIds || []);
+  const entries = room.players.map(p => {
+    const wasInRound = activeIds.has(p.id);
+    const absent = !wasInRound || !p.connected;
+    const score = p.id === winner.id ? 0 : (wasInRound ? handScore(p) : null);
+    return { playerId: p.id, name: p.name, score, absent, winner: p.id === winner.id };
+  });
+  room.scoreHistory.push({ gameNumber: room.gameNumber, winnerId: winner.id, winnerName: winner.name, entries });
+}
+function nextActiveTurn(room, fromIndex) {
+  const n = room.players.length;
+  for (let step = 1; step <= n; step++) {
+    const index = (fromIndex + step) % n;
+    const p = room.players[index];
+    if (p && p.connected && (room.status !== "playing" || !room.roundPlayerIds || room.roundPlayerIds.includes(p.id))) return index;
+  }
+  return fromIndex;
 }
 function cardValue(card) {
   return card.rank === "A" ? 1 : (["J","Q","K"].includes(card.rank) ? 10 : Number(card.rank));
@@ -91,7 +137,8 @@ function maybeWin(room, player) {
   if (player.hand.length === 0) {
     room.status = "finished";
     room.winnerId = player.id;
-    room.message = `${player.name} wins!`;
+    recordRoundScore(room, player);
+    room.message = `${player.name} wins Game ${room.gameNumber}! Scores have been added below.`;
     return true;
   }
   return false;
@@ -107,7 +154,7 @@ io.on("connection", socket => {
         settings: { handSize, maxPlayers: 10, decks: null, jokers: false },
         players: [{ id: socket.id, name, hand: [], melds: [], connected: true }],
         stock: [], discard: [], currentTurn: 0, winnerId: null, message: "Waiting for players.",
-        drawn: null
+        drawn: null, roundPlayerIds: [], gameNumber: 0, scoreHistory: []
       };
       rooms.set(code, room); socket.data.roomCode = code;
       socket.emit("joined", { code }); emitRoom(room);
@@ -221,7 +268,7 @@ io.on("connection", socket => {
       room.discard.push(card);
       room.drawn = null;
       if (maybeWin(room, player)) { emitRoom(room); return; }
-      room.currentTurn = (room.currentTurn + 1) % room.players.length;
+      room.currentTurn = nextActiveTurn(room, room.currentTurn);
       room.message = `${player.name} discarded ${card.rank}${card.suit}.`;
       if (room.stock.length === 0) {
         // Recycle all but the top discard into a freshly shuffled stock.
@@ -239,7 +286,7 @@ io.on("connection", socket => {
     try {
       const room = getRoom(socket);
       if (socket.id !== room.hostId) throw new Error("Only the host can start a rematch.");
-      room.status = "lobby"; room.winnerId = null; room.message = "Ready for another game."; room.stock=[]; room.discard=[]; room.drawn=null;
+      room.status = "lobby"; room.winnerId = null; room.message = "Ready for another game. Previous scores are saved below."; room.stock=[]; room.discard=[]; room.drawn=null; room.roundPlayerIds=[];
       room.players.forEach(p => { p.hand=[]; p.melds=[]; });
       emitRoom(room);
     } catch(e) { errorTo(socket, e.message); }
@@ -248,7 +295,15 @@ io.on("connection", socket => {
     const room = rooms.get(socket.data.roomCode);
     if (!room) return;
     const p = room.players.find(p => p.id === socket.id);
-    if (p) { p.connected = false; room.message = `${p.name} disconnected.`; }
+    if (p) {
+      p.connected = false;
+      room.message = `${p.name} is absent. Their score will still be recorded at the end of this game.`;
+      if (room.status === "playing" && room.players[room.currentTurn]?.id === p.id) {
+        if (room.drawn?.playerId === p.id) room.drawn = null;
+        room.currentTurn = nextActiveTurn(room, room.currentTurn);
+        room.message += " Their turn was skipped.";
+      }
+    }
     emitRoom(room);
     // Keep the room alive briefly so a reconnecting player can see the room, but this starter project does not yet implement session recovery.
     setTimeout(() => {
