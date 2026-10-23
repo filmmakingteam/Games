@@ -9,7 +9,6 @@ const server = http.createServer(app);
 const io = new Server(server);
 const PORT = process.env.PORT || 3000;
 app.use(express.static(path.join(__dirname, "public")));
-app.get("/", (_, res) => res.sendFile(path.join(__dirname, "index.html")));
 app.get("/health", (_, res) => res.json({ ok: true, game: "Basic Rummy" }));
 
 const rooms = new Map();
@@ -44,6 +43,7 @@ function publicState(room, viewerId) {
       handCount: p.hand.length, melds: p.melds
     })),
     hand: (room.players.find(p => p.id === viewerId) || {}).hand || [],
+    latestDrawnCardId: room.drawn && room.drawn.playerId === viewerId ? room.drawn.cardId : null,
     discard: room.discard.slice(-8),
     winnerId: room.winnerId,
     message: room.message
@@ -81,7 +81,7 @@ function cardValue(card) {
 function validMeld(cards) {
   if (!Array.isArray(cards) || cards.length < 3) return false;
   const sameRank = cards.every(c => c.rank === cards[0].rank);
-  if (sameRank && new Set(cards.map(c => c.suit)).size === cards.length) return true;
+  if (sameRank && cards.length <= 4 && new Set(cards.map(c => c.suit)).size === cards.length) return true;
   const sameSuit = cards.every(c => c.suit === cards[0].suit);
   if (!sameSuit) return false;
   const vals = cards.map(c => c.rank === "A" ? 1 : (c.rank === "J" ? 11 : c.rank === "Q" ? 12 : c.rank === "K" ? 13 : Number(c.rank))).sort((a,b)=>a-b);
@@ -174,6 +174,39 @@ io.on("connection", socket => {
       if (maybeWin(room, player)) { emitRoom(room); return; }
       emitRoom(room);
     } catch(e) { errorTo(socket, e.message); }
+  });
+  socket.on("layoff", ({ cardIds, targetPlayerId, targetMeldIndex }) => {
+    try {
+      const room = getRoom(socket);
+      if (room.status !== "playing") throw new Error("The game is not in progress.");
+      const player = room.players[room.currentTurn];
+      if (player.id !== socket.id) throw new Error("It is not your turn.");
+      if (!room.drawn || room.drawn.playerId !== player.id) throw new Error("Draw a card before adding to a meld.");
+      if (!Array.isArray(cardIds) || cardIds.length < 1 || new Set(cardIds).size !== cardIds.length) {
+        throw new Error("Select one or more different cards to add.");
+      }
+      const cards = cardIds.map(id => player.hand.find(c => c.id === id));
+      if (cards.some(c => !c)) throw new Error("One or more selected cards are not in your hand.");
+      const targetPlayer = room.players.find(p => p.id === targetPlayerId);
+      if (!targetPlayer || !Number.isInteger(targetMeldIndex) || !targetPlayer.melds[targetMeldIndex]) {
+        throw new Error("Select an existing table meld first.");
+      }
+      const meld = targetPlayer.melds[targetMeldIndex];
+      if (!validMeld(meld.concat(cards))) {
+        throw new Error("Those cards do not legally extend that meld. Runs need consecutive ranks in the same suit; sets need the same rank and distinct suits.");
+      }
+      // Sets may contain at most one card of each suit; a multi-deck game still uses the standard four-suit set rule.
+      const combined = meld.concat(cards);
+      const sameRank = combined.every(c => c.rank === combined[0].rank);
+      if (sameRank && (combined.length > 4 || new Set(combined.map(c => c.suit)).size !== combined.length)) {
+        throw new Error("A set can contain at most four cards, one per suit.");
+      }
+      targetPlayer.melds[targetMeldIndex] = combined;
+      player.hand = player.hand.filter(c => !cardIds.includes(c.id));
+      room.message = `${player.name} added ${cards.length} card${cards.length === 1 ? "" : "s"} to ${targetPlayer.name}'s meld.`;
+      if (maybeWin(room, player)) { emitRoom(room); return; }
+      emitRoom(room);
+    } catch (e) { errorTo(socket, e.message); }
   });
   socket.on("discardCard", ({ cardId }) => {
     try {
