@@ -1,0 +1,10 @@
+{
+  "name": "basic-rummy-multiplayer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Original mobile-friendly Basic Rummy multiplayer game for 2-10 players",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" },
+  "dependencies": { "express": "^4.21.2", "socket.io": "^4.8.1" }
+}
