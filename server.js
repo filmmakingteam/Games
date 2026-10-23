@@ -9,6 +9,7 @@ const server = http.createServer(app);
 const io = new Server(server);
 const PORT = process.env.PORT || 3000;
 app.use(express.static(path.join(__dirname, "public")));
+app.get("/", (_, res) => res.sendFile(path.join(__dirname, "index.html")));
 app.get("/health", (_, res) => res.json({ ok: true, game: "Basic Rummy" }));
 
 const rooms = new Map();
