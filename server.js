@@ -87,7 +87,22 @@ function startGame(room) {
   for (let i = 0; i < h; i++) for (const p of activePlayers) p.hand.push(cards.pop());
   room.stock = cards;
   room.discard = [room.stock.pop()];
-  room.currentTurn = room.players.findIndex(p => p.connected && room.roundPlayerIds.includes(p.id));
+  // Rotate the opening turn from one connected player to the next for each game in this room.
+  const previousStarterIndex = room.lastStarterId
+    ? room.players.findIndex(p => p.id === room.lastStarterId)
+    : -1;
+  let starterIndex = -1;
+  for (let step = 1; step <= room.players.length; step++) {
+    const candidateIndex = (previousStarterIndex + step + room.players.length) % room.players.length;
+    const candidate = room.players[candidateIndex];
+    if (candidate && candidate.connected && room.roundPlayerIds.includes(candidate.id)) {
+      starterIndex = candidateIndex;
+      break;
+    }
+  }
+  if (starterIndex < 0) starterIndex = room.players.findIndex(p => p.connected && room.roundPlayerIds.includes(p.id));
+  room.currentTurn = starterIndex;
+  room.lastStarterId = room.players[starterIndex]?.id || null;
   room.status = "playing";
   room.winnerId = null;
   room.gameNumber = (room.gameNumber || 0) + 1;
@@ -154,7 +169,7 @@ io.on("connection", socket => {
         settings: { handSize, maxPlayers: 10, decks: null, jokers: false },
         players: [{ id: socket.id, name, hand: [], melds: [], connected: true }],
         stock: [], discard: [], currentTurn: 0, winnerId: null, message: "Waiting for players.",
-        drawn: null, roundPlayerIds: [], gameNumber: 0, scoreHistory: []
+        drawn: null, roundPlayerIds: [], gameNumber: 0, scoreHistory: [], lastStarterId: null
       };
       rooms.set(code, room); socket.data.roomCode = code;
       socket.emit("joined", { code }); emitRoom(room);
