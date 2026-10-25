@@ -159,7 +159,7 @@ function maybeWin(room, player) {
   return false;
 }
 io.on("connection", socket => {
-  socket.on("createRoom", ({ name, handSize }) => {
+  socket.on("createRoom", ({ name, handSize, playerToken }) => {
     try {
       name = String(name || "Player").trim().slice(0, 20) || "Player";
       handSize = Math.max(3, Math.min(20, Number(handSize) || 7));
@@ -167,7 +167,7 @@ io.on("connection", socket => {
       const room = {
         code, hostId: socket.id, status: "lobby",
         settings: { handSize, maxPlayers: 10, decks: null, jokers: false },
-        players: [{ id: socket.id, name, hand: [], melds: [], connected: true }],
+        players: [{ id: socket.id, token: String(playerToken || crypto.randomBytes(24).toString("hex")), name, hand: [], melds: [], connected: true }],
         stock: [], discard: [], currentTurn: 0, winnerId: null, message: "Waiting for players.",
         drawn: null, roundPlayerIds: [], gameNumber: 0, scoreHistory: [], lastStarterId: null
       };
@@ -175,7 +175,7 @@ io.on("connection", socket => {
       socket.emit("joined", { code }); emitRoom(room);
     } catch (e) { errorTo(socket, e.message); }
   });
-  socket.on("joinRoom", ({ code, name }) => {
+  socket.on("joinRoom", ({ code, name, playerToken }) => {
     try {
       code = String(code || "").trim().toUpperCase();
       const room = rooms.get(code);
@@ -184,10 +184,40 @@ io.on("connection", socket => {
       if (room.players.length >= 10) throw new Error("This room already has 10 players.");
       name = String(name || "Player").trim().slice(0, 20) || "Player";
       if (room.players.some(p => p.name.toLowerCase() === name.toLowerCase())) name += ` ${room.players.length + 1}`;
-      room.players.push({ id: socket.id, name, hand: [], melds: [], connected: true });
+      room.players.push({ id: socket.id, token: String(playerToken || crypto.randomBytes(24).toString("hex")), name, hand: [], melds: [], connected: true });
       socket.data.roomCode = code; socket.emit("joined", { code }); room.message = `${name} joined the room.`; emitRoom(room);
     } catch (e) { errorTo(socket, e.message); }
   });
+  // Restore the same player seat and hand after a temporary disconnect or page reload.
+  socket.on("reconnectRoom", ({ code, playerToken }) => {
+    try {
+      code = String(code || "").trim().toUpperCase();
+      playerToken = String(playerToken || "");
+      const room = rooms.get(code);
+      if (!room) throw new Error("That game is no longer on the server. The room may have expired or the server restarted.");
+      if (!playerToken) throw new Error("No saved player token was found. Join the room normally.");
+      const p = room.players.find(player => player.token && player.token === playerToken);
+      if (!p) throw new Error("This saved player session was not found in that room.");
+      const oldId = p.id;
+      // If an older socket is still around, stop it from controlling the recovered seat.
+      p.id = socket.id;
+      p.connected = true;
+      socket.data.roomCode = code;
+      if (room.hostId === oldId) room.hostId = socket.id;
+      if (room.lastStarterId === oldId) room.lastStarterId = socket.id;
+      if (room.winnerId === oldId) room.winnerId = socket.id;
+      if (room.drawn && room.drawn.playerId === oldId) room.drawn.playerId = socket.id;
+      room.roundPlayerIds = (room.roundPlayerIds || []).map(id => id === oldId ? socket.id : id);
+      (room.scoreHistory || []).forEach(round => {
+        if (round.winnerId === oldId) round.winnerId = socket.id;
+        (round.entries || []).forEach(entry => { if (entry.playerId === oldId) entry.playerId = socket.id; });
+      });
+      room.message = `${p.name} reconnected. Their original seat and hand have been restored.`;
+      socket.emit("joined", { code, playerToken: p.token, reconnected: true });
+      emitRoom(room);
+    } catch (e) { errorTo(socket, e.message); }
+  });
+
   socket.on("setHandSize", ({ handSize }) => {
     try {
       const room = getRoom(socket);
@@ -320,7 +350,7 @@ io.on("connection", socket => {
       }
     }
     emitRoom(room);
-    // Keep the room alive briefly so a reconnecting player can see the room, but this starter project does not yet implement session recovery.
+    // Keep the room alive briefly for a temporary reconnect. Rooms are still in-memory only.
     setTimeout(() => {
       const current = rooms.get(room.code);
       if (current && current.players.every(x => !x.connected)) rooms.delete(room.code);
