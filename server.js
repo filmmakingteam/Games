@@ -81,6 +81,7 @@ function startGame(room) {
   const h = room.settings.handSize;
   if (activePlayers.length < 2) throw new Error("At least 2 connected players are needed to start.");
   const decks = requiredDecks(activePlayers.length, h);
+  room.settings.deckCount = decks;
   const cards = makeDeck(decks);
   room.players.forEach(p => { p.hand = []; p.melds = []; });
   room.roundPlayerIds = activePlayers.map(p => p.id);
@@ -142,7 +143,10 @@ function cardValue(card) {
 function validMeld(cards) {
   if (!Array.isArray(cards) || cards.length < 3) return false;
   const sameRank = cards.every(c => c.rank === cards[0].rank);
-  if (sameRank && cards.length <= 4 && new Set(cards.map(c => c.suit)).size === cards.length) return true;
+  // In multi-deck games, a set may contain repeated physical cards of the same suit/rank.
+  // Card IDs remain unique; permit up to one copy per deck for each of the four suits.
+  const deckCopies = new Set(cards.map(c => String(c.id).split("-")[0])).size;
+  if (sameRank && cards.length <= 4 * Math.max(1, deckCopies) && new Set(cards.map(c => c.id)).size === cards.length) return true;
   const sameSuit = cards.every(c => c.suit === cards[0].suit);
   if (!sameSuit) return false;
   const vals = cards.map(c => c.rank === "A" ? 1 : (c.rank === "J" ? 11 : c.rank === "Q" ? 12 : c.rank === "K" ? 13 : Number(c.rank))).sort((a,b)=>a-b);
@@ -287,12 +291,11 @@ io.on("connection", socket => {
       if (!validMeld(meld.concat(cards))) {
         throw new Error("Those cards do not legally extend that meld. Runs need consecutive ranks in the same suit; sets need the same rank and distinct suits.");
       }
-      // Sets may contain at most one card of each suit; a multi-deck game still uses the standard four-suit set rule.
+      // Multi-deck sets can include repeated suit/rank cards, but not more copies than the decks allow.
       const combined = meld.concat(cards);
       const sameRank = combined.every(c => c.rank === combined[0].rank);
-      if (sameRank && (combined.length > 4 || new Set(combined.map(c => c.suit)).size !== combined.length)) {
-        throw new Error("A set can contain at most four cards, one per suit.");
-      }
+      const maxSetSize = 4 * Math.max(1, room.settings.deckCount || 1);
+      if (sameRank && combined.length > maxSetSize) throw new Error(`A set can contain at most ${maxSetSize} cards for this deck count.`);
       targetPlayer.melds[targetMeldIndex] = combined;
       player.hand = player.hand.filter(c => !cardIds.includes(c.id));
       room.message = `${player.name} added ${cards.length} card${cards.length === 1 ? "" : "s"} to ${targetPlayer.name}'s meld.`;
