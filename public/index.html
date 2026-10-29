@@ -155,24 +155,101 @@ function canAddMeld(m,add){const all=m.concat(add);if(all.length>=3&&all.every(c
 function demoLayoff(ids,target){if(!demoDrawn)return notice("Draw a card first.","error");const owner=demoPlayers.find(p=>p.id===target.playerId),meld=owner?.melds[target.meldIndex],p=demoPlayers[0],cards=ids.map(id=>p.hand.find(c=>c.id===id));if(!meld)return notice("Select a valid table meld.","error");if(cards.some(c=>!c)||!canAddMeld(meld,cards)){notice("Those cards do not legally extend this meld.","error");return;}meld.push(...cards);p.hand=p.hand.filter(c=>!ids.includes(c.id));selected.clear();if(!p.hand.length)demoWinner=p.name;notice(demoWinner?`${demoWinner} wins!`:`Added ${cards.length} card(s) to ${owner.name}'s meld. Discard to end your turn.`);renderDemo();}
 function computerTurn(){
  if(!demo||demoWinner)return;const p=demoPlayers[demoTurn];if(!p||demoTurn===0)return;
- // Choose the discard-top card when it helps complete a set/run or extend a table meld.
- if(!demoStock.length)demoRecycle();const top=demoDiscard[demoDiscard.length-1];let takeDiscard=!!top&&cardUsefulForAI(p,top);
- let drawn=takeDiscard?demoDiscard.pop():demoStock.pop();if(!drawn&&demoDiscard.length){drawn=demoDiscard.pop();}if(drawn)p.hand.push(drawn);
- // Lay down every available 3+ card meld, prioritizing larger melds first.
- let changed=true;while(changed){changed=false;const groups=findAIMelds(p.hand);if(groups.length){const group=groups.sort((a,b)=>b.length-a.length)[0];p.melds.push(group);const ids=new Set(group.map(c=>c.id));p.hand=p.hand.filter(c=>!ids.has(c.id));changed=true;}}
- // Lay off all cards that legally extend an existing run or set.
- for(const card of [...p.hand]){let placed=false;for(const owner of demoPlayers){for(const meld of owner.melds){if(canAddMeld(meld,[card])){meld.push(card);p.hand=p.hand.filter(c=>c.id!==card.id);placed=true;break;}}if(placed)break;}}
+ // Draw from the discard pile only when it completes a meld, creates a useful near-meld,
+ // or can be laid off immediately. Otherwise preserve information and draw from stock.
+ if(!demoStock.length)demoRecycle();
+ const top=demoDiscard[demoDiscard.length-1];
+ const takeDiscard=!!top&&cardUsefulForAI(p,top);
+ let drawn=takeDiscard?demoDiscard.pop():demoStock.pop();
+ if(!drawn&&demoDiscard.length)drawn=demoDiscard.pop();
+ if(drawn)p.hand.push(drawn);
+ // Repeatedly choose the best non-overlapping meld, not just the first longest candidate.
+ // This prevents overlapping runs from hiding an available set.
+ let changed=true;
+ while(changed){
+   changed=false;
+   const groups=findAIMelds(p.hand).filter(g=>g.length>=3);
+   let best=null,bestScore=-Infinity;
+   for(const group of groups){
+     const ids=new Set(group.map(c=>c.id));
+     if(ids.size!==group.length)continue;
+     const score=group.length*100 + group.reduce((sum,c)=>sum+aiCardPotential(c,p.hand),0)*0.1;
+     if(score>bestScore){best=group;bestScore=score;}
+   }
+   if(best){p.melds.push(orderedMeld(best));const ids=new Set(best.map(c=>c.id));p.hand=p.hand.filter(c=>!ids.has(c.id));changed=true;}
+ }
+ // Use cards that extend table melds, but only after laying down every meld in hand.
+ for(const card of [...p.hand]){
+   let placed=false;
+   for(const owner of demoPlayers){
+     for(const meld of owner.melds){
+       if(canAddMeld(meld,[card])){meld.push(card);p.hand=p.hand.filter(c=>c.id!==card.id);placed=true;break;}
+     }
+     if(placed)break;
+   }
+ }
  if(!p.hand.length){demoWinner=p.name;renderDemo();return;}
- // Discard the least useful card: prefer cards that are not adjacent in suit or same-rank.
- let worst=0,worstScore=Infinity;for(let i=0;i<p.hand.length;i++){const score=aiCardPotential(p.hand[i],p.hand);if(score<worstScore){worstScore=score;worst=i;}}
- demoDiscard.push(p.hand.splice(worst,1)[0]);if(!p.hand.length){demoWinner=p.name;renderDemo();return;}
- demoTurn=(demoTurn+1)%demoPlayers.length;if(demoTurn===0){demoDrawn=false;notice("Your turn. Draw a card.");}else{setTimeout(computerTurn,550);}renderDemo();
+ // Discard the card with the lowest value to the computer's future melds. Break ties by
+ // shedding high-point cards, while avoiding throwing away the visible discard's useful pair.
+ let worst=0,worstScore=Infinity;
+ for(let i=0;i<p.hand.length;i++){
+   const c=p.hand[i];
+   const potential=aiCardPotential(c,p.hand);
+   const value=cardValueAI(c);
+   const score=potential*10-value*0.65+(c.id===drawn?.id?0.25:0);
+   if(score<worstScore){worstScore=score;worst=i;}
+ }
+ demoDiscard.push(p.hand.splice(worst,1)[0]);
+ if(!p.hand.length){demoWinner=p.name;renderDemo();return;}
+ demoTurn=(demoTurn+1)%demoPlayers.length;
+ if(demoTurn===0){demoDrawn=false;notice("Your turn. Draw a card.");}
+ else setTimeout(computerTurn,550);
+ renderDemo();
 }
-function cardUsefulForAI(p,c){const same=p.hand.filter(x=>x.rank===c.rank).length;const near=p.hand.filter(x=>x.suit===c.suit&&Math.abs(rankVal(x)-rankVal(c))<=2).length;const canExtend=demoPlayers.some(owner=>owner.melds.some(m=>canAddMeld(m,[c])));return same>=1||near>=1||canExtend;}
-function findAIMelds(hand){const out=[];const byRank={};for(const c of hand)(byRank[c.rank]??=[]).push(c);for(const cards of Object.values(byRank)){if(cards.length>=3){ // Select up to three copies, including repeated suits from multiple decks.
- const chosen=cards.slice(0,Math.min(cards.length,8));if(chosen.length>=3)out.push(chosen);
- }}for(const suit of suits){const cards=hand.filter(c=>c.suit===suit).sort((a,b)=>rankVal(a)-rankVal(b));for(let i=0;i<cards.length;i++){let run=[cards[i]];for(let j=i+1;j<cards.length;j++){const prev=rankVal(run[run.length-1]),v=rankVal(cards[j]);if(v===prev)continue;if(v===prev+1){run.push(cards[j]);if(run.length>=3)out.push(run.slice());}else if(v>prev+1)break;}}}return out.sort((a,b)=>b.length-a.length);}
-function aiCardPotential(c,hand){let score=0;for(const x of hand){if(x.id===c.id)continue;if(x.rank===c.rank)score+=4;if(x.suit===c.suit&&Math.abs(rankVal(x)-rankVal(c))===1)score+=3;else if(x.suit===c.suit&&Math.abs(rankVal(x)-rankVal(c))===2)score+=1;}return score; }
+function cardValueAI(c){return c.rank==="A"?1:(['J','Q','K'].includes(c.rank)?10:Number(c.rank));}
+function cardUsefulForAI(p,c){
+ const candidate=[...p.hand,c];
+ if(findAIMelds(candidate).some(g=>g.length>=3&&g.some(x=>x.id===c.id)))return true;
+ if(demoPlayers.some(owner=>owner.melds.some(m=>canAddMeld(m,[c]))))return true;
+ const same=p.hand.filter(x=>x.rank===c.rank).length;
+ const near=p.hand.filter(x=>x.suit===c.suit&&Math.abs(rankVal(x)-rankVal(c))<=2).length;
+ return same>=1||near>=2;
+}
+function findAIMelds(hand){
+ const out=[],seen=new Set();
+ const add=(cards)=>{if(cards.length<3)return;const key=cards.map(c=>c.id).sort().join('|');if(!seen.has(key)){seen.add(key);out.push(cards.slice());}};
+ const byRank={};
+ for(const c of hand)(byRank[c.rank]??=[]).push(c);
+ for(const cards of Object.values(byRank)){
+   if(cards.length>=3){
+     // Generate several viable same-rank sets instead of assuming one arbitrary grouping.
+     const sorted=cards.slice().sort((a,b)=>String(a.suit).localeCompare(String(b.suit))||String(a.id).localeCompare(String(b.id)));
+     add(sorted.slice(0,Math.min(sorted.length,8)));
+     for(let i=0;i<sorted.length;i++)for(let j=i+1;j<sorted.length;j++)for(let k=j+1;k<sorted.length;k++)add([sorted[i],sorted[j],sorted[k]]);
+   }
+ }
+ for(const suit of suits){
+   const cards=hand.filter(c=>c.suit===suit).sort((a,b)=>rankVal(a)-rankVal(b));
+   for(let i=0;i<cards.length;i++){
+     let run=[cards[i]];
+     for(let j=i+1;j<cards.length;j++){
+       const prev=rankVal(run[run.length-1]),v=rankVal(cards[j]);
+       if(v===prev)continue;
+       if(v===prev+1){run.push(cards[j]);if(run.length>=3)add(run);}
+       else if(v>prev+1)break;
+     }
+   }
+ }
+ return out.sort((a,b)=>b.length-a.length);
+}
+function aiCardPotential(c,hand){
+ let score=0;
+ for(const x of hand){if(x.id===c.id)continue;
+   if(x.rank===c.rank)score+=4;
+   if(x.suit===c.suit){const gap=Math.abs(rankVal(x)-rankVal(c));if(gap===1)score+=3;else if(gap===2)score+=1;}
+ }
+ return score;
+}
 function renderDemo(){show("game");const p=demoPlayers[0];$("gameCode").textContent="DEMO";$("winnerCelebration").classList.toggle("hidden",!demoWinner);if(demoWinner){$("winnerTitle").textContent="GAME COMPLETED!";$("winnerName").textContent=demoWinner;}$("statusTitle").textContent=demoWinner?"🎊 Game completed 🎉":demoTurn===0?"Your turn":`${demoPlayers[demoTurn].name}'s turn`;$("players").innerHTML=demoPlayers.map((x,i)=>`<div class="player ${i===demoTurn&&!demoWinner?"active":""}"><b>${esc(x.name)}${i===0?" (you)":""}</b><small>${x.hand.length} cards · ${x.melds.length} meld(s)</small></div>`).join("");$("stockCount").textContent=`${demoStock.length} cards`;$("discardCount").textContent=`${demoDiscard.length} in pile`;$("discardTop").innerHTML=demoDiscard.length?cardHTML(demoDiscard[demoDiscard.length-1],false):"—";$("handCount").textContent=`${p.hand.length} cards`;$("hand").innerHTML=p.hand.slice().sort(cardSort).map(c=>cardHTML(c,selected.has(c.id),true,c.id===demoLatestDrawnId)).join("");$("hand").querySelectorAll(".card").forEach(el=>el.onclick=()=>toggleCard(el.dataset.id));const all=demoPlayers.flatMap(x=>x.melds.map((m,mi)=>({player:x,meld:m,meldIndex:mi})));$("meldArea").innerHTML=all.map(x=>{const isTarget=targetMeld&&targetMeld.playerId===x.player.id&&targetMeld.meldIndex===x.meldIndex;return `<div class="meld-wrap" style="${isTarget?'border-color:var(--gold)':''}"><div class="meld-owner">${esc(x.player.name)} · Meld ${x.meldIndex+1}</div><div class="meld">${orderedMeld(x.meld).map(c=>cardHTML(c,false)).join("")}</div><button class="secondary" data-player="${x.player.id}" data-meld="${x.meldIndex}">${isTarget?"Selected":"Select target"}</button></div>`}).join("");$("meldArea").querySelectorAll("button[data-player]").forEach(b=>b.onclick=()=>{targetMeld={playerId:b.dataset.player,meldIndex:+b.dataset.meld};renderDemo()});$("drawStockBtn").disabled=demoTurn!==0||demoDrawn||!!demoWinner||(!demoStock.length&&demoDiscard.length<=1);$("drawDiscardBtn").disabled=demoTurn!==0||demoDrawn||!!demoWinner||!demoDiscard.length;$("discardBtn").disabled=demoTurn!==0||!demoDrawn||!!demoWinner;$("meldBtn").disabled=demoTurn!==0||!demoDrawn||!!demoWinner;$("layoffBtn").disabled=demoTurn!==0||!demoDrawn||!!demoWinner||!targetMeld;$("newGameBtn").classList.remove("hidden");if(demoWinner)notice(`${demoWinner} wins! Start a new demo to play again.`);}
 const params=new URLSearchParams(location.search);if(params.get("room"))$("roomCode").value=params.get("room").toUpperCase();
 </script>
